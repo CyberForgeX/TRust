@@ -11,6 +11,7 @@ Welcome to the Rust Disk Cache with Encryption repository! 🎉 This project boa
     Systemd Service Generation: Empowers effortless deployment of Rust-based services with auto-generation of systemd service files based on user input.
 
 **!! BE AWARE OF WEAR AND TEAR ON THE HARD DRIVE YOUR RUNNING THIS ON!!**
+
 The wear and tear isn't that big on M2 - but it does put a heavier load on it. I haven't tried it on HDD or SDD - so I don't know how that would be. If anyone are interested in trying that out, do so at your own risk. If it went well, could you make an issue for it and mention it?
 
 **💻 Usage**
