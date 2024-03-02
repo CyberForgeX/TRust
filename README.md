@@ -52,4 +52,4 @@ CyberForgeX
 
 **🙏 Acknowledgments**
 
-Gratitude to the developers of the libraries and frameworks utilized in this project, including Tokio, serde, aes_gcm, and sha2. Their contributions have enriched this endeavor immensely.
+Gratitude to those who use, share, donate and contribute to these projects. 
