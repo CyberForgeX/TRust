@@ -2,6 +2,8 @@
 
 Welcome to the Rust Disk Cache with Encryption repository! 🎉 This project boasts a robust disk caching system implemented in Rust, fortified with encryption to safeguard your precious data. Engineered to optimize performance through asynchronous IO and concurrency, it stands as a stalwart solution adaptable to a myriad of Rust applications. With it you can enhance the memory of your computer with RAM/VRAM using systemctl enable this script. It's not meant as a replacement for hardware, but rather an enhancer. It is highly reccommended to run it on a NVMe M2 because HDD or even SDD will struggle with read and write processes and they are particularly vulnerable to wear and tear of the software. The M2 is also prone to wear and tear, but less so and M2 is very close to real-time data, altough obviosuly it's not as fast as regular hardware type of RAM. It is primarily designed for Linux, but you can adapt the code to work with any OS of your choice with a few tweaks. This program will enhance everything you do on your PC, I mainly build it so it could work with my AI models.
 
+<a href="https://www.buymeacoffee.com/CyberForgeX" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/arial-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+
 **🌟 Features**
 
     Asynchronous IO: Harnesses Tokio's asynchronous IO prowess for lightning-fast disk operations, bolstering performance and scalability.
