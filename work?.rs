@@ -1,17 +1,18 @@
-use aes_gcm::{Aes256Gcm, Key};
-use aes_gcm::aead::Nonce;
-use chrono::{Duration, Utc};
-use flate2::read::GzDecoder;
-use hex;
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, NewAead};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+use generic_array::typenum::U12;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    env,
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    process::Command,
 };
 use thiserror::Error;
 use tokio::{
@@ -19,13 +20,13 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::Semaphore,
 };
-use dialoguer::Input;
-use std::env::current_exe; // Import current_exe from std::env
-use dotenv;
+use chrono::{Duration, Utc};
+use dialoguer::{Input, Confirm};
 
 // Constants
 const CACHE_DIR: &str = "/tmp/rust_cache";
 const MAX_CONCURRENT_WRITES: usize = 10;
+const DEFAULT_CACHE_CAPACITY: usize = 100;
 const ENCRYPTION_KEY_FILE: &str = "/tmp/encryption_key";
 
 // Custom Error Type for Cache Operations
@@ -45,20 +46,18 @@ enum CacheError {
     CompressionError(String),
     #[error("Decompression Error: {0}")]
     DecompressionError(String),
-    #[error("Failed to generate nonce")]
-    NonceGenerationError,
 }
 
-// Cache Entry Structure with generic parameter
+// Cache Entry Structure
 #[derive(Debug, Serialize, Deserialize)]
-struct CacheEntry<A> {
+struct CacheEntry {
     value: String,
     expiry: Option<i64>,
     checksum: String,
-    nonce: Option<Nonce<A>>,
+    nonce: Option<Nonce>,
 }
 
-impl<A> CacheEntry<A> {
+impl CacheEntry {
     fn is_expired(&self) -> bool {
         self.expiry.map_or(false, |expiry| expiry <= Utc::now().timestamp())
     }
@@ -92,7 +91,7 @@ impl DiskCache {
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>, use_compression: bool) -> Result<(), CacheError> {
         let expiry = ttl.map(|duration| Utc::now().timestamp() + duration.num_seconds());
-        let nonce = if self.encryption_enabled { Some(generate_nonce()?) } else { None };
+        let nonce = if self.encryption_enabled { Some(Nonce::generate()) } else { None };
         let entry = CacheEntry { 
             value: value.to_owned(), 
             expiry, 
@@ -108,15 +107,11 @@ impl DiskCache {
         let mut file = AsyncFile::create(file_path).await?;
         let serialized_entry = serde_json::to_string(&entry)?;
         let encrypted_entry = if let Some(nonce) = &entry.nonce {
-            encrypt(&serialized_entry, nonce)?
+            encrypt(serialized_entry, &nonce)?
         } else {
             serialized_entry.into_bytes()
         };
-
-        let mut decoder = GzDecoder::new(file);
-        decoder.write_all(&encrypted_entry)?;
-        decoder.finish()?;
-
+        file.write_all(&encrypted_entry).await?;
         drop(permit);
 
         Ok(())
@@ -133,20 +128,19 @@ impl DiskCache {
 
         let file_path = self.dir.join(key);
         if file_path.exists() {
-            let file = File::open(file_path)?;
-            let mut decoder = GzDecoder::new(file);
-            let mut contents = String::new();
-            decoder.read_to_string(&mut contents)?;
+            let mut file = AsyncFile::open(file_path).await?;
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).await?;
 
             let decrypted_entry = if self.encryption_enabled {
-                let entry: CacheEntry = serde_json::from_str(&contents)?;
+                let entry: CacheEntry = serde_json::from_slice(&contents)?;
                 let nonce = entry.nonce.ok_or(CacheError::DecryptionError("Nonce missing".to_string()))?;
-                encrypt(&contents, &nonce)?
+                encrypt(contents, &nonce)?
             } else {
                 contents
             };
 
-            let entry: CacheEntry = serde_json::from_str(&decrypted_entry)?;
+            let entry: CacheEntry = serde_json::from_slice(&decrypted_entry)?;
             if entry.is_expired() {
                 return Ok(None);
             }
@@ -163,21 +157,21 @@ impl DiskCache {
     }
 }
 
-fn generate_nonce() -> Result<Vec<u8>, CacheError> {
+fn generate_nonce() -> Nonce {
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
-    Ok(nonce.to_vec())
+    Nonce::from_slice(&nonce)
 }
 
-fn encrypt(data: &str, nonce: &[u8]) -> Result<Vec<u8>, CacheError> {
+fn encrypt(data: &str, nonce: &Nonce) -> Result<Vec<u8>, CacheError> {
     let key = load_encryption_key()?;
     let cipher = Aes256Gcm::new(Key::from_slice(&key));
-    cipher.encrypt(&nonce, data.as_bytes())
+    cipher.encrypt(nonce, data.as_bytes())
         .map_err(|_| CacheError::EncryptionError("Encryption failed".into()))
 }
 
 fn load_encryption_key() -> Result<Key, CacheError> {
-    if Path::new(ENCRYPTION_KEY_FILE).exists() {
+    if PathBuf::from(ENCRYPTION_KEY_FILE).exists() {
         let mut file = File::open(ENCRYPTION_KEY_FILE)?;
         let mut key_bytes = [0u8; 32];
         file.read_exact(&mut key_bytes)?;
@@ -191,11 +185,38 @@ fn load_encryption_key() -> Result<Key, CacheError> {
     }
 }
 
+fn compress(data: &[u8]) -> Result<Vec<u8>, CacheError> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data)?;
+    encoder.finish().map_err(|e| CacheError::CompressionError(e.to_string()))
+}
+
+fn decompress(data: &[u8]) -> Result<Vec<u8>, CacheError> {
+    let mut decoder = GzDecoder::new(data);
+    let mut decompressed_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_data)?;
+    Ok(decompressed_data)
+}
+
 fn hash_value(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value);
     let result = hasher.finalize();
     hex::encode(result)
+}
+
+fn load_encryption_key() -> Result<Key, CacheError> {
+    if Path::new(ENCRYPTION_KEY_FILE).exists() {
+        let mut file = File::open(ENCRYPTION_KEY_FILE)?;
+        let mut key_bytes = [0u8; 32];
+        file.read_exact(&mut key_bytes)?;
+        Ok(Key::from_slice(&key_bytes))
+    } else {
+        let key = Key::generate();
+        let mut file = File::create(ENCRYPTION_KEY_FILE)?;
+        file.write_all(key.as_ref())?;
+        Ok(key)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,13 +226,14 @@ struct Config {
 
 fn load_config() -> Result<Config, CacheError> {
     Ok(Config {
-        encryption_enabled: dotenv::var("ENCRYPTION_ENABLED").unwrap_or_else(|_| "false".to_string()).parse().unwrap(),
+        encryption_enabled: env::var("ENCRYPTION_ENABLED").unwrap_or_else(|_| "false".to_string()).parse().unwrap(),
     })
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CacheError> {
-    println!("Detected executable path: {}", current_exe()?.to_string_lossy()); // Use current_exe directly
+    let exec_path = env::current_exe()?.to_string_lossy().into_owned();
+    println!("Detected executable path: {}", exec_path);
 
     let service_name: String = Input::new()
         .with_prompt("Enter the service name")
@@ -223,8 +245,8 @@ async fn main() -> Result<(), CacheError> {
         .default("My Rust Service".into())
         .interact_text()?;
 
-    let additional_dotenv: String = Input::new()
-        .with_prompt("Enter additional dotenvironment variables (key=value), separate multiple with ';'")
+    let additional_env: String = Input::new()
+        .with_prompt("Enter additional environment variables (key=value), separate multiple with ';'")
         .default("".into())
         .interact_text()?;
 
@@ -239,21 +261,30 @@ async fn main() -> Result<(), CacheError> {
          After=network.target\n\
          \n\
          [Service]\n\
-         dotenvironment=\"ENCRYPTION_ENABLED=true\"{additional_dotenv}\n\
+         Environment=\"ENCRYPTION_ENABLED=true\"{additional_env}\n\
          ExecStart={exec_path} {additional_args}\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n",
         description=description,
-        exec_path=current_exe()?.to_string_lossy(), // Use current_exe directly
-        additional_dotenv=additional_dotenv.split(';').map(|s| format!("\ndotenvironment=\"{}\"", s)).collect::<String>(),
+        exec_path=exec_path,
+        additional_env=additional_env.split(';').map(|s| format!("\nEnvironment=\"{}\"", s)).collect::<String>(),
         additional_args=additional_args,
     );
+
+    let service_file_name = format!("/etc/systemd/system/{}.service", service_name);
+    let service_file_path = Path::new(&service_file_name);
 
     let service_file_path = Path::new(&format!("/etc/systemd/system/{}.service", service_name));
     let mut file = File::create(service_file_path)?;
     file.write_all(service_file_content.as_bytes())?;
     println!("Systemd service file created at: {}", service_file_path.display());
+
+    if Confirm::new().with_prompt("Would you like to reload systemd daemons and enable the service now?").interact()? {
+        Command::new("systemctl").arg("daemon-reload").status()?;
+        Command::new("systemctl").arg("enable").arg(&service_name).status()?;
+        println!("Service '{}' enabled. You can start it with 'systemctl start {}'", service_name, service_name);
+    }
 
     Ok(())
 }
