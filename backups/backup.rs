@@ -67,7 +67,7 @@ impl<A> CacheEntry<A> {
 // Thread-safe Disk Cache Implementation
 struct DiskCache {
     dir: PathBuf,
-    map: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    map: Arc<Mutex<HashMap<String, CacheEntry<()>>>>, // Add generic argument `<()>` for CacheEntry
     capacity: usize,
     write_semaphore: Arc<Semaphore>,
     encryption_enabled: bool,
@@ -211,7 +211,7 @@ fn load_config() -> Result<Config, CacheError> {
 
 #[tokio::main]
 async fn main() -> Result<(), CacheError> {
-    println!("Detected executable path: {}", current_exe()?.to_string_lossy()); // Use current_exe directly
+    println!("Detected executable path: {}", current_exe()?.to_string_lossy());
 
     let service_name: String = Input::new()
         .with_prompt("Enter the service name")
@@ -245,7 +245,7 @@ async fn main() -> Result<(), CacheError> {
          [Install]\n\
          WantedBy=multi-user.target\n",
         description=description,
-        exec_path=current_exe()?.to_string_lossy(), // Use current_exe directly
+        exec_path=current_exe()?.to_string_lossy(),
         additional_dotenv=additional_dotenv.split(';').map(|s| format!("\ndotenvironment=\"{}\"", s)).collect::<String>(),
         additional_args=additional_args,
     );
